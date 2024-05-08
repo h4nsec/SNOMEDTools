@@ -1,10 +1,11 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 import csv
 import requests
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 import pandas as pd
 import re
+import json
 
 # Optionally disable SSL warnings
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
@@ -24,11 +25,15 @@ def load_file():
 
 # Function to strip post-coordinated expressions and remove extra spaces
 def strip_post_coordinated_expression(expression):
-    # Remove descriptions, spaces, and only keep numeric IDs and structure
-    stripped_expression = re.sub(r'\|\s*[^|]+\s*\|', '', expression)
-    # Remove extra spaces outside of numbers, brackets, etc.
-    stripped_expression = re.sub(r'\s+', '', stripped_expression)
+    stripped_expression = re.sub(r'\|[^|]+\|', '', expression)  # Remove text within pipes
+    stripped_expression = re.sub(r'[^\d{}=:,]', '', stripped_expression)  # Keep only numbers and symbols
+    stripped_expression = re.sub(r'\s*(:|\{|\}|=|,)\s*', r'\1', stripped_expression)  # Tidy structural characters
     return stripped_expression
+
+def clean_expression(expression):
+    #Remove minor artifacting from the above Regex
+    expression = re.sub(r',=}','}', expression)
+    return expression
 
 # Function to strip expressions dynamically
 def strip_file():
@@ -53,6 +58,7 @@ def strip_file():
 
     add_log(f"Stripped file saved as {output_path}")
     messagebox.showinfo("Strip Complete", f"Stripped file saved as {output_path}")
+
 
 # Function to process the file (Deconstruct)
 def process_file(file_path):
@@ -153,8 +159,11 @@ def validate_file():
         'Content-Type': 'application/fhir+json'
     }
 
+    # Prepare to store validation results
+    validation_results = []
+
     # Validate each expression
-    for index, expression in enumerate(df["Post_Coordinated_Expression"]):
+    for index, expression in enumerate(df["Post_Coordinated_Expression_Stripped"]):
         params = {
             'url': system,
             'code': expression,
@@ -164,20 +173,29 @@ def validate_file():
 
         if response.status_code == 200:
             json_response = response.json()
-            result = next((param["valueBoolean"] for param in json_response["parameter"] if param["name"] == "result"), False)
-
+            result = next((param['valueBoolean'] for param in json_response.get('parameter', []) if param['name'] == 'result'), None)
             if result:
                 validation_message = f"Row {index + 1}: Expression is valid."
                 valid_count += 1
+                validation_results.append("Valid")
             else:
                 validation_message = f"Row {index + 1}: Expression is not valid."
                 invalid_count += 1
+                validation_results.append("Invalid")
         else:
             validation_message = f"Row {index + 1}: Server error - {response.text}"
             invalid_count += 1
+            validation_results.append("Server Error")
 
         # Display individual validation results in the scrolled text area
         add_log(validation_message)
+
+    # Append validation results to DataFrame
+    df['Validation_Result'] = validation_results
+
+    # Save the DataFrame with the new column
+    output_path = file_path.replace('.tsv', '_validated.tsv')
+    df.to_csv(output_path, sep='\t', index=False)
 
     # Display summary results
     summary_message = (f"Total expressions processed: {total_expressions}\n"
@@ -185,6 +203,46 @@ def validate_file():
                        f"Invalid expressions: {invalid_count}")
     add_log(summary_message)
     messagebox.showinfo("Validation Summary", summary_message)
+    add_log(f"Validation results saved to {output_path}")
+
+def validate_single_code():
+    code = simpledialog.askstring("Input", "Enter SNOMED CT Code:", parent=root)
+    if code:
+        # Define the OntoServer URL and other parameters
+        url = "https://r4.ontoserver.csiro.au/fhir/CodeSystem/$validate-code"
+        params = {
+            'url': "http://snomed.info/sct",
+            'code': code,
+            'system': "http://snomed.info/sct"
+        }
+        headers = {
+            'Accept': 'application/fhir+json',
+            'Content-Type': 'application/fhir+json'
+        }
+        # Send the request
+        response = requests.get(url, params=params, headers=headers)
+        if response.status_code == 200:
+            # Pretty print JSON response
+            pretty_json = json.dumps(response.json(), indent=4)
+            #messagebox.showinfo("Validation Result", pretty_json)
+            add_log(f"Validation Result for {code}:\n{pretty_json}")
+        else:
+            add_log(f"Failed to validate code {code}: {response.text}")
+            messagebox.showinfo("Error", f"Failed to validate code {code}: {response.text}")
+
+def center_window():
+    root.update_idletasks()  # Update "idle" tasks to ensure correct window sizes
+    # Get the screen dimensions
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    
+    # Calculate position x, y
+    width = root.winfo_reqwidth()
+    height = root.winfo_reqheight()
+    x = int((screen_width / 2) - (width / 2))
+    y = int((screen_height / 2) - (height / 2))
+    
+    root.geometry(f"{width}x{height}+{x}+{y}")  # Set the window size and position
 
 
 # Create the root window
@@ -216,9 +274,16 @@ strip_btn.pack(side="left", padx=5)
 validate_btn = tk.Button(button_frame, text="Validate", padx=10, pady=5, fg="white", bg="#263D42", command=validate_file)
 validate_btn.pack(side="left", padx=5)
 
+single_code_btn = tk.Button(button_frame, text="Single Code", padx=10, pady=5, fg="white", bg="#263D42", command=validate_single_code)
+single_code_btn.pack(side="left", padx=5)
+
 
 close_btn = tk.Button(button_frame, text="Close", padx=10, pady=5, fg="white", bg="#263D42", command=root.quit)
 close_btn.pack(side="left", padx=5)
+
+root.iconbitmap("img/snowflake.ico")
+
+center_window()
 
 # Run the main loop
 root.mainloop()
